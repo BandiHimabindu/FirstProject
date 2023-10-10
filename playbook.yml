@@ -1,0 +1,36 @@
+# playbook to see if apache package is installed or not
+
+
+---
+- hosts: apache-server
+  become: yes
+  tasks:
+    - name: "Check if APACHE is installed"
+      package_facts:
+        manager: "auto"
+    - name: "Apache result"
+      debug:
+         msg: "Apache found"
+      when: "'httpd' in ansible_facts.packages"
+    - name: "Apache result"
+      debug:
+         msg: "Apache NOT found"
+      when: "'httpd' not in ansible_facts.packages"
+
+---
+-hosts: loc  
+ with_items:  
+  -'docker-ce'  
+  -'nginx'  
+  -'git'  
+ tasks:  
+   - name: ansible apt with_items   
+      apt:  
+       name: "{{item}}"  
+       update_cache: true  # false to delete
+       state: present  
+   - name: Ansible copy file to a remote server  
+     copy:  
+      src: ~/sample.txt  
+      dest: /tmp  
+      force: no  # to not replace the content if the file is already present 
