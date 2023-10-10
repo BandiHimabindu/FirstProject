@@ -1,0 +1,5 @@
+[localhost]
+176.84.19.78
+
+[targets]
+target1 ansible_host=176.89.34.87 ansible_connection=ssh ansible_ssh_pass=password
