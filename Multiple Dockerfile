@@ -1,0 +1,38 @@
+FROM PYTHON3.1
+RUN apt-get update && apt-get install python
+COPY ./work.jar/* .
+WORKDIR /opt/app.py
+CMD [app.py]
+
+##Docker tomcat image
+FROM centos
+# Who Crate and manage this container image
+MAINTAINER hello@gritfy.com
+#Commands to Run to make the image( the future container) in the way you want
+RUN mkdir /opt/tomcat/
+#Define a workspace where the upcoming (or) following set of commands/instructions should be executed in
+WORKDIR /opt/tomcat
+RUN curl -O https://www-eu.apache.org/dist/tomcat/tomcat-8/v8.5.40/bin/apache-tomcat-8.5.40.tar.gz
+RUN tar xvfz apache*.tar.gz
+RUN mv apache-tomcat-8.5.40/* /opt/tomcat/.
+RUN yum -y install java
+RUN java -version
+WORKDIR /opt/tomcat/webapps
+RUN curl -O -L https://github.com/AKSarav/SampleWebApp/raw/master/dist/SampleWebApp.war
+EXPOSE 8080
+CMD ["/opt/tomcat/bin/catalina.sh", "run"]
+
+
+## Multistage build ( can use Destroless images also which provide only runtime env & provides security)
+FROM python:3 as build
+WORKDIR /app
+COPY requirements.txt .
+EXPOSE 8000
+CMD ["python", "/app"]
+
+FROM build
+WORKDIR /app
+COPY files.txt .
+RUN  mvn install
+EXPOSE 8080
+CMD ["pyton", "/app"]
