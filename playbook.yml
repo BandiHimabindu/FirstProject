@@ -34,3 +34,63 @@
       src: ~/sample.txt  
       dest: /tmp  
       force: no  # to not replace the content if the file is already present 
+
+
+
+
+
+# ansible practice
+-name: practice
+  host: localhost
+  become_user: ubuntu
+  connection: ssh
+  gather_facts: yes
+  vars:
+    my_pkg: apache2
+  tasks:
+    -user: name '{{ ? }}'' state=present uid:'{{}}''
+    loop:
+     -name: joe
+      uid: 1234
+    - user: name='{{item}}' state=present
+      with_items:
+       - joe
+       - george
+    -name: execute command 'date'
+     command: date
+    -name: Display resolve.cfg file
+     command: cat resolve.cfg
+     ignore_errors: yes
+    -name: Display resolve.cfg file
+     command: cat resolve.cfg chdir=/etc
+    -name: Display resolve.cfg file
+     command: mkdir /folder creates=/folder
+    -name: Copy file from source to destination
+     copy: src=/etc dest=/folder
+    -name: Execute script on server
+     script: example_script.sh
+     run_once: true # to run a task one time
+     deligate_to: target1  # to run a task on particular machine which is optional
+     #installing httpd service
+    -name: install httpd service
+     yum: name=httpd state= present
+     when: ansible_os_family=='redhat'
+     async: 300 # runs tasks parallely
+     poll: 10 #checks the status once in every 10s
+     #starting httpd server
+    -name: start httpd web service
+     wait_for:
+      port: 80
+      state: started
+     service: name=httpd state=started
+    -lineinfile:
+        path: /etc/resolve.cfg
+        line: 'server 176.23.34.78'
+     
+    -name: install apache
+     apt: name='{{my_pkg}}' state=present
+     notify: restart apache
+    -handler: restart apache #same name as notify
+     service: name='{{my_pkg}}' state=restarted
+    
+
