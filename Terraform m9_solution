@@ -1,0 +1,467 @@
+## main.tf
+
+# S3 Bucket config#
+resource "aws_iam_role" "allow_instance_s3" {
+  name = "${var.bucket_name}_allow_instance_s3"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+EOF
+
+  tags = var.common_tags
+
+}
+
+resource "aws_iam_instance_profile" "instance_profile" {
+  name = "${var.bucket_name}_instance_profile"
+  role = aws_iam_role.allow_instance_s3.name
+}
+
+resource "aws_iam_role_policy" "allow_s3_all" {
+  name = "${var.bucket_name}_allow_all"
+  role = aws_iam_role.allow_instance_s3.name
+
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "s3:*"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+                "arn:aws:s3:::${var.bucket_name}",
+                "arn:aws:s3:::${var.bucket_name}/*"
+            ]
+    }
+  ]
+}
+EOF
+
+}
+
+resource "aws_s3_bucket" "web_bucket" {
+  bucket        = var.bucket_name
+  acl           = "private"
+  force_destroy = true
+
+  policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "${var.elb_service_account_arn}"
+      },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::${var.bucket_name}/alb-logs/*"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "delivery.logs.amazonaws.com"
+      },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::${var.bucket_name}/alb-logs/*",
+      "Condition": {
+        "StringEquals": {
+          "s3:x-amz-acl": "bucket-owner-full-control"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "delivery.logs.amazonaws.com"
+      },
+      "Action": "s3:GetBucketAcl",
+      "Resource": "arn:aws:s3:::${var.bucket_name}"
+    }
+  ]
+}
+    POLICY
+
+  tags = var.common_tags
+
+}
+
+## outputs.tf
+output "web_bucket" {
+  value = aws_s3_bucket.web_bucket
+}
+
+output "instance_profile" {
+  value = aws_iam_instance_profile.instance_profile
+}
+
+
+## variables.tf
+
+variable "bucket_name" {
+  type        = string
+  description = "Name of the S3 bucket to create"
+}
+
+variable "elb_service_account_arn" {
+  type        = string
+  description = "ARN of ELB service account"
+}
+
+variable "common_tags" {
+  type        = map(string)
+  description = "Map of tags to be applied to all resources"
+  default     = {}
+}
+
+
+## instances.tf
+
+##################################################################################
+# DATA
+##################################################################################
+
+data "aws_ssm_parameter" "ami" {
+  name = "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+}
+
+##################################################################################
+# RESOURCES
+##################################################################################
+
+# INSTANCES #
+resource "aws_instance" "nginx" {
+  count                  = var.instance_count[terraform.workspace]
+  ami                    = nonsensitive(data.aws_ssm_parameter.ami.value)
+  instance_type          = var.instance_type[terraform.workspace]
+  subnet_id              = module.vpc.public_subnets[(count.index % var.vpc_subnet_count[terraform.workspace])]
+  vpc_security_group_ids = [aws_security_group.nginx-sg.id]
+  iam_instance_profile   = module.web_app_s3.instance_profile.name
+  depends_on             = [module.web_app_s3]
+
+  user_data = templatefile("${path.module}/startup_script.tpl", {
+    s3_bucket_name = module.web_app_s3.web_bucket.id
+  })
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-nginx-${count.index}"
+  })
+
+}
+
+
+## loadbalancer.tf
+##################################################################################
+# DATA
+##################################################################################
+
+data "aws_elb_service_account" "root" {}
+
+##################################################################################
+# RESOURCES
+##################################################################################
+
+resource "aws_lb" "nginx" {
+  name               = "${local.name_prefix}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb_sg.id]
+  subnets            = module.vpc.public_subnets
+
+  enable_deletion_protection = false
+
+  access_logs {
+    bucket  = module.web_app_s3.web_bucket.id
+    prefix  = "alb-logs"
+    enabled = true
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group" "nginx" {
+  name     = "${local.name_prefix}-alb-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = module.vpc.vpc_id
+}
+
+resource "aws_lb_listener" "nginx" {
+  load_balancer_arn = aws_lb.nginx.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.nginx.arn
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group_attachment" "nginx" {
+  count            = var.instance_count[terraform.workspace]
+  target_group_arn = aws_lb_target_group.nginx.arn
+  target_id        = aws_instance.nginx[count.index].id
+  port             = 80
+}
+
+
+## Locals.tf
+#Random ID for unique naming
+resource "random_integer" "rand" {
+  min = 10000
+  max = 99999
+}
+
+locals {
+  common_tags = {
+    company      = var.company
+    project      = "${var.company}-${var.project}"
+    billing_code = var.billing_code
+    environment  = terraform.workspace
+  }
+
+  name_prefix    = "${var.naming_prefix}-${terraform.workspace}"
+  s3_bucket_name = lower("${local.name_prefix}-${random_integer.rand.result}")
+}
+
+## Network.tf
+##################################################################################
+# DATA
+##################################################################################
+
+data "aws_availability_zones" "available" {}
+
+##################################################################################
+# RESOURCES
+##################################################################################
+
+# NETWORKING #
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 3.0"
+
+  cidr           = var.vpc_cidr_block[terraform.workspace]
+  azs            = slice(data.aws_availability_zones.available.names, 0, (var.vpc_subnet_count[terraform.workspace]))
+  public_subnets = [for subnet in range(var.vpc_subnet_count[terraform.workspace]) : cidrsubnet(var.vpc_cidr_block[terraform.workspace], 8, subnet)]
+
+  enable_nat_gateway      = false
+  enable_dns_hostnames    = var.enable_dns_hostnames
+  map_public_ip_on_launch = var.map_public_ip_on_launch
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-vpc"
+  })
+
+}
+
+# SECURITY GROUPS #
+# ALB Security Group
+resource "aws_security_group" "alb_sg" {
+  name   = "${local.name_prefix}-nginx_alb_sg"
+  vpc_id = module.vpc.vpc_id
+
+  #Allow HTTP from anywhere
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  #allow all outbound
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+
+}
+
+# Nginx security group 
+resource "aws_security_group" "nginx-sg" {
+  name   = "${local.name_prefix}-nginx_sg"
+  vpc_id = module.vpc.vpc_id
+
+  # HTTP access from VPC
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr_block[terraform.workspace]]
+  }
+
+  # outbound internet access
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+
+## outputs.tf
+output "aws_alb_public_dns" {
+  value = aws_lb.nginx.dns_name
+}
+
+## variables.tf
+
+variable "naming_prefix" {
+  type        = string
+  description = "Naming prefix for resources"
+  default     = "globoweb"
+}
+
+variable "aws_region" {
+  type        = string
+  description = "Region for AWS Resources"
+  default     = "us-east-1"
+}
+
+variable "enable_dns_hostnames" {
+  type        = bool
+  description = "Enable DNS hostnames in VPC"
+  default     = true
+}
+
+variable "vpc_cidr_block" {
+  type        = map(string)
+  description = "Base CIDR Block for VPC"
+}
+
+variable "vpc_subnet_count" {
+  type        = map(number)
+  description = "Number of subnets to create in VPC"
+}
+
+variable "map_public_ip_on_launch" {
+  type        = bool
+  description = "Map a public IP address for Subnet instances"
+  default     = true
+}
+
+variable "instance_type" {
+  type        = map(string)
+  description = "Type for EC2 Instance"
+}
+
+variable "instance_count" {
+  type        = map(number)
+  description = "Number of instances to create in VPC"
+}
+
+variable "company" {
+  type        = string
+  description = "Company name for resource tagging"
+  default     = "Globomantics"
+}
+
+variable "project" {
+  type        = string
+  description = "Project name for resource tagging"
+}
+
+variable "billing_code" {
+  type        = string
+  description = "Billing code for resource tagging"
+}
+
+
+## providers.tf
+
+##################################################################################
+# TERRAFORM CONFIG
+##################################################################################
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 3.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+
+  }
+}
+
+##################################################################################
+# PROVIDERS
+##################################################################################
+
+provider "aws" {
+  region = var.aws_region
+}
+
+## s3.tf
+module "web_app_s3" {
+  source = "./modules/globo-web-app-s3"
+
+  bucket_name             = local.s3_bucket_name
+  elb_service_account_arn = data.aws_elb_service_account.root.arn
+  common_tags             = local.common_tags
+}
+
+resource "aws_s3_bucket_object" "website" {
+  for_each = {
+    website = "/website/index.html"
+    logo    = "/website/Globo_logo_Vert.png"
+  }
+  bucket = module.web_app_s3.web_bucket.id
+  key    = each.value
+  source = ".${each.value}"
+
+  tags = local.common_tags
+}
+
+## terrform.tfvars.example
+billing_code = "ACCT8675309"
+
+project = "globo-web-app"
+
+vpc_cidr_block = {
+  Development = "10.0.0.0/16"
+  UAT = "10.1.0.0/16"
+  Production = "10.2.0.0/16"
+}
+
+vpc_subnet_count = {
+  Development = 2
+  UAT = 2
+  Production = 3
+}
+
+instance_type = {
+  Development = "t2.micro"
+  UAT = "t2.small"
+  Production = "t2.medium"
+}
+
+instance_count = {
+  Development = 2
+  UAT = 4
+  Production = 6
+}
