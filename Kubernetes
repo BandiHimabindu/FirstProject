@@ -1,0 +1,68 @@
+# ConfigMap.yml
+
+apiVersion: v1
+kind: ConfigMap
+metadata: 
+  name: test-cm
+data:
+ db-port: "3306"  # container will not alloow to change value we use volume mount
+
+# Deploymentspec.yml
+
+apiVersion: app/v1
+kind: deployment
+metadata:
+ name: Sample-python-app
+ labels:
+  app: first
+spec:
+ replicas: 2
+ selector:
+   matchlabels:
+    app: first
+ strategy:
+    type: RollingUpdate #recreate(delete and deploy again), canary(one change at a time), blue/green deployment(slowly diverting traffic to new version)
+ template:
+   metadata:
+    labels:
+    app: first
+   spec:
+     containers:
+     - name: python-app
+       image: bindu/python-sample-app-demo:v1
+       (env: 
+        - name: DB-PORT
+          valueFrom:
+           configMapKeyRef:
+            name: test-cm
+            key: db-port)
+        volumeMounts:
+         - name: db-connection
+           mountPath: /opt
+        ports: 
+        - containerPort: 8080
+         resources:
+          limits:
+            memory: 200Mi
+          requests:
+              cpu: 100m
+              memory: 200Mi
+      volumes:
+        - name: db-connection
+          configMap:
+            name: test-cm     
+
+## SErvice.yml
+apiVersion: vl
+kind: service
+metadata:
+ name: first service
+spec:
+ type: loadbalancer
+ selector: 
+  app: first
+ ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
